@@ -100,7 +100,6 @@ try:
 except ImportError:
     pass
 
-
 LOG = _logging.getLogger("jira")
 LOG.addHandler(_logging.NullHandler())
 
@@ -309,6 +308,7 @@ class JIRA:
         "agile_rest_path": GreenHopperResource.AGILE_BASE_REST_PATH,
         "agile_rest_api_version": "1.0",
         "verify": True,
+        "server_ca": None,
         "resilient": True,
         "async": False,
         "async_workers": 5,
@@ -379,6 +379,8 @@ class JIRA:
                 * agile_rest_path - the REST path to use for Jira Agile requests. Defaults to ``greenhopper`` (old, private
                   API). Check :py:class:`jira.resources.GreenHopperResource` for other supported values.
                 * verify -- Verify SSL certs. Defaults to ``True``.
+                * server_ca -- the path to the certificate authority for the server SSL certificate. Ignored if 'verify'
+                  is set to ``False``. Defaults to ``None``.
                 * client_cert -- a tuple of (cert,key) for the requests library for client side SSL
                 * check_update -- Check whether using the newest python-jira library version.
                 * headers -- a dict to update the default headers the session uses for all API requests.
@@ -492,12 +494,12 @@ class JIRA:
             # always log in for cookie based auth, as we need a first request to be logged in
             validate = True
         else:
-            verify = bool(self._options["verify"])
             self._session = ResilientSession(timeout=timeout)
-            self._session.verify = verify
 
         # Add the client authentication certificate to the request if configured
         self._add_client_cert_to_session()
+
+        self._set_server_verification()
 
         self._session.headers.update(self._options["headers"])
 
@@ -560,7 +562,6 @@ class JIRA:
     ):
         self._session = ResilientSession(timeout=timeout)
         self._session.auth = JiraCookieAuth(self._session, self.session, auth)
-        self._session.verify = bool(self._options["verify"])
 
     def _check_update_(self):
         """Check if the current version of the library is outdated."""
@@ -3345,16 +3346,12 @@ class JIRA:
         Returns:
             ResilientSession
         """
-        verify = bool(self._options["verify"])
         self._session = ResilientSession(timeout=timeout)
-        self._session.verify = verify
         self._session.auth = (username, password)
 
     def _create_oauth_session(
         self, oauth, timeout: Optional[Union[Union[float, int], Tuple[float, float]]]
     ):
-        verify = bool(self._options["verify"])
-
         from oauthlib.oauth1 import SIGNATURE_RSA
         from requests_oauthlib import OAuth1
 
@@ -3366,7 +3363,6 @@ class JIRA:
             resource_owner_secret=oauth["access_token_secret"],
         )
         self._session = ResilientSession(timeout)
-        self._session.verify = verify
         self._session.auth = oauth_instance
 
     def _create_kerberos_session(
@@ -3374,7 +3370,6 @@ class JIRA:
         timeout: Optional[Union[Union[float, int], Tuple[float, float]]],
         kerberos_options=None,
     ):
-        verify = bool(self._options["verify"])
         if kerberos_options is None:
             kerberos_options = {}
 
@@ -3391,7 +3386,6 @@ class JIRA:
             )
 
         self._session = ResilientSession(timeout=timeout)
-        self._session.verify = verify
         self._session.auth = HTTPKerberosAuth(
             mutual_authentication=mutual_authentication
         )
@@ -3402,6 +3396,36 @@ class JIRA:
         """
         client_cert: Tuple[str, str] = self._options["client_cert"]  # to help mypy
         self._session.cert = client_cert
+
+    def _set_server_verification(self):
+        """
+        Sets the Session verify value based on the 'verify' and 'server_ca' options provided
+        """
+        verify = bool(self._options["verify"])
+
+        # Warn on a False setting which means server certificate verification is disabled
+        if not verify:
+            self.log.warning(
+                "Disabling server certificate authority checks is not recommended in production environments"
+            )
+
+        # Check if the verify is set to 'True' and a server_ca is provided
+        if verify and self._options["server_ca"] is not None:
+            # Confirm that the path exists for the server_ca
+            ca_path = os.path.abspath((self._options["server_ca"]).strip())
+            if os.path.exists(ca_path) and os.path.isfile(ca_path):
+                verify = ca_path
+                self.log.info(
+                    f"Setting server certificate authority verification to {ca_path}"
+                )
+            else:
+                # Log the error since the server_ca was provided but is not valid
+                self.log.fatal(
+                    f"The provided server certificate authority ({ca_path}) is not valid"
+                )
+
+        # Set the verify property of the Session object
+        self._session.verify = verify
 
     @staticmethod
     def _timestamp(dt: datetime.timedelta = None):
@@ -3428,7 +3452,6 @@ class JIRA:
         for f in jwt["payload"].items():
             jwt_auth.add_field(f[0], f[1])
         self._session = ResilientSession(timeout=timeout)
-        self._session.verify = bool(self._options["verify"])
         self._session.auth = jwt_auth
 
     def _create_token_session(
@@ -3440,9 +3463,7 @@ class JIRA:
         Creates token-based session.
         Header structure: "authorization": "Bearer <token_auth>"
         """
-        verify = self._options["verify"]
         self._session = ResilientSession(timeout=timeout)
-        self._session.verify = verify
         self._session.auth = TokenAuth(token_auth)
 
     def _set_avatar(self, params, url, avatar):
@@ -3839,7 +3860,6 @@ class JIRA:
             str
         """
         if not hasattr(self, "_myself"):
-
             url = self._get_url("myself")
             r = self._session.get(url, headers=self._options["headers"])
 
